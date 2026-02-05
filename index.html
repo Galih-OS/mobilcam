@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<title>Dashcam Pro MAX++</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+
+<style>
+body{
+  background:#000;color:#0f0;
+  font-family:monospace;text-align:center
+}
+#wrap{
+  position:relative;
+  width:100%;
+  max-width:640px;
+  margin:auto;
+}
+video{
+  width:100%;
+  height:auto;
+  z-index:1;
+  position:relative;
+  border:2px solid #0f0;
+}
+canvas{
+  position:absolute;
+  top:0;left:0;
+  z-index:2;
+  pointer-events:none;
+}
+#hud{
+  position:absolute;
+  top:10px;left:10px;
+  z-index:3;
+  background:rgba(0,0,0,.6);
+  padding:6px;font-size:12px;
+}
+#map{
+  height:200px;
+  margin:10px auto;
+  max-width:640px;
+  border:2px solid #0f0;
+}
+button{margin:5px;padding:10px}
+#error{color:red;margin-top:10px}
+</style>
+</head>
+
+<body>
+
+<h3>🚗 DASHCAM PRO MAX++</h3>
+
+<div id="wrap">
+  <video id="video" playsinline muted></video>
+  <canvas id="canvas"></canvas>
+  <div id="hud">STATUS: READY</div>
+</div>
+
+<div id="map"></div>
+
+<button onclick="init()">▶ START CAMERA</button>
+<button onclick="startRecord()">🎥 RECORD</button>
+<button onclick="stopRecord()">⏹ STOP</button>
+
+<div id="error"></div>
+
+<audio id="alarm" src="assets/alarm.mp3"></audio>
+
+<script>
+const video = document.getElementById("video");
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+const hud = document.getElementById("hud");
+const alarm = document.getElementById("alarm");
+const errorBox = document.getElementById("error");
+
+let model, recorder, chunks=[];
+let speed=0, blink=false;
+let lastSplit=Date.now();
+const splitDuration=300000;
+
+// ===== MAP =====
+const map = L.map('map').setView([0,0],16);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+let gpsPath=[];
+let polyline=L.polyline(gpsPath,{color:"lime"}).addTo(map);
+
+// ===== INIT =====
+async function init(){
+  await startCam();
+  await loadModel();
+}
+
+// ===== GPS =====
+navigator.geolocation.watchPosition(p=>{
+  const lat=p.coords.latitude;
+  const lon=p.coords.longitude;
+  speed=(p.coords.speed||0)*3.6;
+  gpsPath.push([lat,lon]);
+  polyline.setLatLngs(gpsPath);
+  map.setView([lat,lon]);
+},{enableHighAccuracy:true});
+
+// ===== CAMERA =====
+async function startCam(){
+  try{
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video:{facingMode:"environment"},
+      audio:true
+    });
+
+    video.srcObject = stream;
+    await video.play();
+
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+
+    recorder=new MediaRecorder(stream);
+    recorder.ondataavailable=e=>chunks.push(e.data);
+    recorder.onstop=saveVideo;
+
+    detect();
+  }catch(err){
+    errorBox.innerText="❌ CAMERA ERROR: "+err.message;
+  }
+}
+
+// ===== RECORD =====
+function startRecord(){
+  chunks=[];
+  recorder.start();
+}
+function stopRecord(){
+  recorder.stop();
+}
+function saveVideo(){
+  const blob=new Blob(chunks,{type:"video/webm"});
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(blob);
+  a.download="dashcam_"+Date.now()+".webm";
+  a.click();
+  chunks=[];
+}
+
+// ===== AI =====
+async function loadModel(){
+  model=await cocoSsd.load();
+}
+
+// ===== MAIN LOOP =====
+async function detect(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+
+  const now=new Date();
+  hud.innerHTML=`
+    📅 ${now.toLocaleDateString()}<br>
+    🕒 ${now.toLocaleTimeString()}<br>
+    🚗 ${speed.toFixed(1)} km/h
+  `;
+
+  if(recorder?.state==="recording" && Date.now()-lastSplit>splitDuration){
+    recorder.stop(); recorder.start(); lastSplit=Date.now();
+  }
+
+  if(model){
+    const preds=await model.detect(video);
+    preds.forEach(p=>{
+      const [x,y,w,h]=p.bbox;
+      const area=w*h;
+      let color="#0f0";
+
+      if(area>80000){
+        blink=!blink;
+        color=blink?"#fff":"#f00";
+        alarm.play().catch(()=>{});
+      }
+
+      ctx.strokeStyle=color;
+      ctx.lineWidth=3;
+      ctx.strokeRect(x,y,w,h);
+      ctx.fillStyle=color;
+      ctx.fillText(`${p.class} ${Math.round(p.score*100)}%`,x,y-5);
+    });
+  }
+  requestAnimationFrame(detect);
+}
+</script>
+
+</body>
+</html>
